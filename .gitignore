@@ -1,3 +1,6 @@
+# IDE/Editor specific settings
+.idea
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
