@@ -1,0 +1,3 @@
+/*
+Copyright YEAR The mimir-rules-controller Authors.
+*/

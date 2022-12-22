@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,14 +17,17 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
 
+	"github.com/healthjoy/mimir-rules-controller/pkg/controller"
 	rulesclientset "github.com/healthjoy/mimir-rules-controller/pkg/generated/clientset/versioned"
 	rulesinformers "github.com/healthjoy/mimir-rules-controller/pkg/generated/informers/externalversions"
+	"github.com/healthjoy/mimir-rules-controller/pkg/metrics"
 )
 
 var (
 	masterURL  string
 	kubeconfig string
-	config     ControllerConfig
+	address    string
+	config     controller.Config
 	mmConf     client.Config
 )
 
@@ -33,6 +37,7 @@ func init() {
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 
 	// Controller config
+	flag.StringVar(&address, "address", ":9000", "The address to expose prometheus metrics and service endpoints.")
 	flag.StringVar(&config.ClusterName, "cluster-name", getEnv("CLUSTER_NAME", "default"), "The name of the cluster. Used to identify the cluster in the Mimir API.")
 	flag.StringVar(&config.PodName, "pod-name", getEnv("POD_NAME", ""), "The name of the pod")
 	flag.StringVar(&config.PodNamespace, "pod-namespace", getEnv("POD_NAMESPACE", ""), "The namespace of the pod")
@@ -71,7 +76,6 @@ func main() {
 
 	// set up signals, so we handle the first shutdown signal gracefully
 	ctx := contextWithSigterm(context.Background())
-	ctx, cancel := context.WithCancel(ctx)
 
 	// creates the connection
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
@@ -100,12 +104,15 @@ func main() {
 	// Create the rules informer factory
 	rulesInformerFactory := rulesinformers.NewSharedInformerFactory(rulesClient, time.Second*30)
 
-	// Create the controller
-	controller := NewController(config,
+	metricServer := metrics.New()
+	// Create the ruleController
+	ruleController := controller.NewController(config,
 		kubeClient, rulesClient, mimirClient,
-		rulesInformerFactory.Rulescontroller().V1alpha1().MimirRules())
+		rulesInformerFactory.Rulescontroller().V1alpha1().MimirRules(),
+		metricServer.Registry,
+	)
 
-	// Start the informer factories to begin populating the informer caches
+	// runServer the informer factories to begin populating the informer caches
 	rulesInformerFactory.Start(ctx.Done())
 
 	lock := &resourcelock.LeaseLock{
@@ -120,17 +127,20 @@ func main() {
 		},
 	}
 
+	metricServer.Start(ctx, address)
+
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+		Name:          fmt.Sprintf("%s/%s", config.LeaseLockNamespace, config.LeaseLockName),
 		Lock:          lock,
 		LeaseDuration: 15 * time.Second,
 		RenewDeadline: 10 * time.Second,
 		RetryPeriod:   2 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				// Start the controller
+				// runServer the ruleController
 				klog.Info("Started leading")
-				if err = controller.Run(ctx, 2); err != nil {
-					klog.Fatalf("Error running controller: %s", err.Error())
+				if err = ruleController.Run(ctx, 2); err != nil {
+					klog.Fatalf("Error running ruleController: %s", err.Error())
 				}
 			},
 			OnStoppedLeading: func() {
@@ -140,7 +150,6 @@ func main() {
 				if identity == config.Identity() {
 					return
 				}
-				cancel()
 				klog.Infof("New leader elected: %s", identity)
 			},
 		},

@@ -1,0 +1,15 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "mimir-rules-controller.fullname" . }}
+  labels:
+    {{- include "mimir-rules-controller.labels" . | nindent 4 }}
+spec:
+  endpoints:
+  - port: http
+    interval: {{ .Values.serviceMonitor.interval }}
+  selector:
+    matchLabels:
+      {{- include "mimir-rules-controller.selectorLabels" . | nindent 6 }}
+{{- end }}

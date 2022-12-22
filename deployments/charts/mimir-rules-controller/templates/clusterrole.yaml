@@ -1,0 +1,24 @@
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mimir-rules-controller.fullname" . }}
+  labels:
+    {{- include "mimir-rules-controller.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - rulescontroller.k8s.healthjoy.com
+  resources:
+  - mimirrules
+  - mimirrules/status
+  - mimirrules/finalizers
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - create
+  - delete
+{{- end}}
