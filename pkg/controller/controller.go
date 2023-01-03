@@ -1,4 +1,4 @@
-package main
+package controller
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grafana/mimir/pkg/mimirtool/client"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -31,8 +32,8 @@ import (
 
 const controllerAgentName = "mimir-rules-controller"
 
-// ControllerConfig is the configuration for the controller.
-type ControllerConfig struct {
+// Config is the configuration for the controller.
+type Config struct {
 	// ClusterName is the name of the cluster and use as the first part of the
 	// Namespace of RuleNamespace in Mimir
 	ClusterName string
@@ -49,7 +50,7 @@ type ControllerConfig struct {
 }
 
 // Identity returns the identity of the controller.
-func (c *ControllerConfig) Identity() string {
+func (c *Config) Identity() string {
 	if c.identity == "" {
 		c.identity = fmt.Sprintf("%s-%s", c.PodNamespace, c.PodName)
 	}
@@ -58,7 +59,7 @@ func (c *ControllerConfig) Identity() string {
 
 // Controller is the controller implementation for Rule resources
 type Controller struct {
-	config *ControllerConfig
+	config *Config
 	// rulesclientset is a clientset for our own API group
 	rulesclientset clientset.Interface
 
@@ -79,15 +80,25 @@ type Controller struct {
 	// recorder is an event recorder for recording Event resources to the
 	// Kubernetes API.
 	recorder record.EventRecorder
+
+	// syncCounter prometheus counter
+	syncCounter prometheus.Counter
+
+	// syncErrorCounter prometheus counter
+	syncErrorCounter prometheus.Counter
+
+	// syncHistogram prometheus histogram
+	syncHistogram prometheus.Histogram
 }
 
 // NewController returns a new rules controller.
 func NewController(
-	config ControllerConfig,
+	config Config,
 	kubeclientset kubernetes.Interface,
 	rulesclientset clientset.Interface,
 	mimirclient *client.MimirClient,
-	ruleinformer informers.MimirRuleInformer) *Controller {
+	ruleinformer informers.MimirRuleInformer,
+	reg *prometheus.Registry) *Controller {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeclientset.CoreV1().Events("")})
@@ -101,10 +112,29 @@ func NewController(
 		rulesSynced:    ruleinformer.Informer().HasSynced,
 		workqueue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Rules"),
 		recorder:       recorder,
+
+		syncCounter: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "mimir_rules_controller_sync_total",
+			Help: "Total number of syncs",
+		}),
+
+		syncErrorCounter: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "mimir_rules_controller_sync_errors_total",
+			Help: "Total number of sync errors",
+		}),
+
+		syncHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "mimir_rules_controller_sync_duration_seconds",
+			Help: "Sync duration in seconds",
+		}),
 	}
 
+	reg.MustRegister(controller.syncCounter)
+	reg.MustRegister(controller.syncErrorCounter)
+	reg.MustRegister(controller.syncHistogram)
+
 	klog.Info("Setting up event handlers")
-	ruleinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = ruleinformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.enqueueRule,
 		DeleteFunc: controller.enqueueRule,
 		UpdateFunc: func(old, new interface{}) {
@@ -123,7 +153,7 @@ func (c *Controller) Run(ctx context.Context, threadiness int) error {
 	defer runtime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	// Start the informer factories to begin populating the informer caches
+	// runServer the informer factories to begin populating the informer caches
 	klog.Info("Starting Rules controller")
 
 	// Wait for the caches to be synced before starting workers
@@ -184,6 +214,8 @@ func (c *Controller) processNextItem(ctx context.Context) bool {
 }
 
 func (c *Controller) syncHandler(ctx context.Context, key string) error {
+	startTime := time.Now()
+
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -204,14 +236,22 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		return err
 	}
 
-	if rule.ObjectMeta.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(rule, v1alpha1.RuleFinalizer) {
-		controllerutil.AddFinalizer(rule, v1alpha1.RuleFinalizer)
-		if _, err := c.rulesclientset.RulescontrollerV1alpha1().MimirRules(rule.Namespace).Update(ctx, rule, metav1.UpdateOptions{}); err != nil {
-			runtime.HandleError(fmt.Errorf("error adding finalizer to rule '%s': %s", key, err.Error()))
-			return err
+	klog.Info("Check rule generation")
+	if condition := apimeta.FindStatusCondition(rule.Status.Conditions, string(v1alpha1.ConditionTypeReady)); condition != nil {
+		if rule.Generation-condition.ObservedGeneration <= 1 {
+			klog.Info("Rule is up to date")
+			return nil
 		}
-		return nil
 	}
+
+	// Setup defer to update sync metrics
+	defer func() {
+		c.syncCounter.Inc()
+		c.syncHistogram.Observe(time.Since(startTime).Seconds())
+		if err != nil {
+			c.syncErrorCounter.Inc()
+		}
+	}()
 
 	if !rule.ObjectMeta.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(rule, v1alpha1.RuleFinalizer) {
@@ -231,14 +271,6 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		return nil
 	}
 
-	klog.Info("Check rule generation")
-	if condition := apimeta.FindStatusCondition(rule.Status.Conditions, string(v1alpha1.ConditionTypeReady)); condition != nil {
-		if rule.Generation-condition.ObservedGeneration <= 1 {
-			klog.Info("Rule is up to date")
-			return nil
-		}
-	}
-
 	klog.Info("Setup deferred function")
 	defer func() {
 		if _, dErr := c.rulesclientset.RulescontrollerV1alpha1().MimirRules(rule.Namespace).Update(ctx, rule, metav1.UpdateOptions{}); dErr != nil {
@@ -252,6 +284,11 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		}
 		klog.Info("Updated rule status")
 	}()
+
+	if !controllerutil.ContainsFinalizer(rule, v1alpha1.RuleFinalizer) {
+		controllerutil.AddFinalizer(rule, v1alpha1.RuleFinalizer)
+		return nil
+	}
 
 	// Do something with the rule here
 	klog.Info("Processing rule")

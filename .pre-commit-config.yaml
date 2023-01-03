@@ -1,10 +1,8 @@
 repos:
-- repo: https://github.com/dnephin/pre-commit-golang
-  rev: v0.5.1
+- repo: https://github.com/tekwizely/pre-commit-golang
+  rev: v1.0.0-rc.1
   hooks:
+  - id: go-mod-tidy
   - id: go-fmt
-    exclude: templates/
-  - id: go-vet
-    exclude: templates/
+  - id: go-vet-mod
   - id: go-lint
-    exclude: templates/
