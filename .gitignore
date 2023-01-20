@@ -19,3 +19,5 @@
 
 # Project binaries
 cmd/controller/controller
+cmd/controller/mimir-rules-controller
+
