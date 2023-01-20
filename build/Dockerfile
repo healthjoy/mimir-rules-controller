@@ -14,4 +14,3 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM alpine:3.17.0
 COPY --from=builder /go/bin/mimir-rules-controller /bin/mimir-rules-controller
 ENTRYPOINT ["/bin/mimir-rules-controller"]
-CMD ["--help"]
