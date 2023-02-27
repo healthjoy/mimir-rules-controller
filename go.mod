@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/grafana/mimir v0.0.0-20230124131014-5b529d27c4a0
 	github.com/prometheus/client_golang v1.14.0
-	github.com/prometheus/common v0.39.0
+	github.com/prometheus/common v0.40.0
 	github.com/prometheus/prometheus v1.8.2-0.20220620125440-d7e7b8e04b5e
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.26.1
