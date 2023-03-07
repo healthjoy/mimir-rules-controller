@@ -12,7 +12,7 @@ require (
 	k8s.io/apimachinery v0.26.2
 	k8s.io/client-go v0.26.1
 	k8s.io/klog/v2 v2.90.1
-	sigs.k8s.io/controller-runtime v0.14.4
+	sigs.k8s.io/controller-runtime v0.14.5
 )
 
 replace github.com/prometheus/prometheus => github.com/grafana/mimir-prometheus v0.0.0-20230119151144-44904a663c20
