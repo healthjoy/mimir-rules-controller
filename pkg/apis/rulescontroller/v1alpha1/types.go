@@ -19,6 +19,8 @@ type Duration string
 const (
 	// ConditionTypeReady means the condition is in ready state
 	ConditionTypeReady ConditionType = "Ready"
+	// ConditionTypeFailed means the condition is in failed state
+	ConditionTypeFailed ConditionType = "Failed"
 )
 
 const (
