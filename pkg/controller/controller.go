@@ -2,13 +2,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/grafana/mimir/pkg/mimirtool/client"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kuberr "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -228,7 +229,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	if err != nil {
 		// The Rule resource may no longer exist, in which case we stop
 		// processing.
-		if errors.IsNotFound(err) {
+		if kuberr.IsNotFound(err) {
 			runtime.HandleError(fmt.Errorf("rule '%s' in work queue no longer exists", key))
 			return nil
 		}
@@ -274,10 +275,10 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	klog.Info("Setup deferred function")
 	defer func() {
 		if _, dErr := c.rulesclientset.RulescontrollerV1alpha1().MimirRules(rule.Namespace).Update(ctx, rule, metav1.UpdateOptions{}); dErr != nil {
-			dErr = fmt.Errorf("error updating rule status: %s", dErr.Error())
+			dErr = fmt.Errorf("error updating rule status: %w", dErr)
 			runtime.HandleError(dErr)
 			if err != nil {
-				err = fmt.Errorf("exit with %s; update error %s", err, dErr)
+				err = fmt.Errorf("exit with %w; update error %w", err, dErr)
 			} else {
 				err = dErr
 			}
@@ -295,47 +296,44 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	mimirRuleNs, err := rule.Spec.GetMimirRuleNamespace(fmt.Sprintf("%s:%s:%s", c.config.ClusterName, rule.Namespace, rule.Name))
 	if err != nil {
 		err := fmt.Errorf("error getting mimir rule namespace: %w", err)
-		readyCondition := metav1.Condition{
-			Type:               string(v1alpha1.ConditionTypeReady),
+		statusCondition := metav1.Condition{
+			Type:               string(v1alpha1.ConditionTypeFailed),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "Error",
 			Message:            err.Error(),
 			ObservedGeneration: rule.Generation,
 		}
-		apimeta.SetStatusCondition(&rule.Status.Conditions, readyCondition)
+		apimeta.SetStatusCondition(&rule.Status.Conditions, statusCondition)
 		runtime.HandleError(err)
 		return err
 	}
 	if errs := mimirRuleNs.Validate(); len(errs) > 0 {
-		var err error
-		for idx, err := range errs {
-			err = fmt.Errorf("validation err %d: %w", idx, err)
-		}
+		err := fmt.Errorf("validation err: %w", errors.Join(errs...))
 		runtime.HandleError(fmt.Errorf("rule '%s' in work queue has invalid rules: %w", key, err))
-		readyCondition := metav1.Condition{
-			Type:               string(v1alpha1.ConditionTypeReady),
+		statusCondition := metav1.Condition{
+			Type:               string(v1alpha1.ConditionTypeFailed),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "Error",
 			Message:            err.Error(),
 			ObservedGeneration: rule.Generation,
 		}
-		apimeta.SetStatusCondition(&rule.Status.Conditions, readyCondition)
+		apimeta.SetStatusCondition(&rule.Status.Conditions, statusCondition)
 		runtime.HandleError(err)
 		return err
 	}
 	if _, _, err = mimirRuleNs.LintExpressions("mimir"); err != nil {
 		err := fmt.Errorf("rule '%s' in work queue has invalid expressions: %s", key, err)
-		readyCondition := metav1.Condition{
-			Type:               string(v1alpha1.ConditionTypeReady),
+		statusCondition := metav1.Condition{
+			Type:               string(v1alpha1.ConditionTypeFailed),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "Error",
 			Message:            err.Error(),
 			ObservedGeneration: rule.Generation,
 		}
-		apimeta.SetStatusCondition(&rule.Status.Conditions, readyCondition)
+		apimeta.SetStatusCondition(&rule.Status.Conditions, statusCondition)
 		runtime.HandleError(err)
 		return err
 	}
@@ -344,22 +342,22 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		err := c.mimirclient.CreateRuleGroup(ctx, mimirRuleNs.Namespace, group)
 		if err != nil {
 			err := fmt.Errorf("error creating rule group: %w", err)
-			readyCondition := metav1.Condition{
-				Type:               string(v1alpha1.ConditionTypeReady),
+			statusCondition := metav1.Condition{
+				Type:               string(v1alpha1.ConditionTypeFailed),
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
 				Reason:             "Error",
 				Message:            err.Error(),
 				ObservedGeneration: rule.Generation,
 			}
-			apimeta.SetStatusCondition(&rule.Status.Conditions, readyCondition)
+			apimeta.SetStatusCondition(&rule.Status.Conditions, statusCondition)
 			runtime.HandleError(err)
 			return err
 		}
 	}
 
 	klog.Info("Rule created, updating status")
-	readyCondition := metav1.Condition{
+	statusCondition := metav1.Condition{
 		Type:               string(v1alpha1.ConditionTypeReady),
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
@@ -367,7 +365,7 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 		Message:            "Rule is ready",
 		ObservedGeneration: rule.Generation,
 	}
-	apimeta.SetStatusCondition(&rule.Status.Conditions, readyCondition)
+	apimeta.SetStatusCondition(&rule.Status.Conditions, statusCondition)
 
 	klog.Info("Done processing rule")
 	return nil

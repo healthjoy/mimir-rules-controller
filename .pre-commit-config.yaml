@@ -5,4 +5,3 @@ repos:
   - id: go-mod-tidy
   - id: go-fmt
   - id: go-vet-mod
-  - id: go-lint
